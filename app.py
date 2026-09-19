@@ -56,14 +56,23 @@ def get_reader():
 
 def load_and_enhance_image(image_path):
     """
-    Fast-path preprocessing: Loads image and applies CLAHE contrast/brightness adjustment.
-    Denoising is decoupled and only triggered if recognition fails on the enhanced frame.
+    Fast-path preprocessing: Loads image, auto-upscales low-res frames for CRAFT detection,
+    and applies CLAHE contrast/brightness adjustment.
     """
     img = cv2.imread(image_path)
     if img is None:
         # Fallback to PIL for TIFF/RGBA support
         pil_img = Image.open(image_path).convert('RGB')
         img = np.array(pil_img)[:, :, ::-1]
+
+    # Auto-upscale small images:
+    # CRAFT needs text to be at least ~20px high for reliable bounding box detection.
+    # If image dimensions are small (< 600 height or < 800 width), upscale with INTER_CUBIC.
+    h, w = img.shape[:2]
+    if h < 600 or w < 800:
+        scale = max(2.0, min(1200.0 / max(h, 1), 1600.0 / max(w, 1)))
+        scale = min(scale, 3.5)
+        img = cv2.resize(img, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
 
     # Convert to grayscale
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -108,26 +117,50 @@ def clean_and_normalize(raw_results):
     full_text = " ".join([c[0] for c in candidates]).strip()
     upper_full = full_text.upper()
 
-    # Rule A: Stop Sign (Tolerates 0 vs O substitution e.g. ST0P)
-    if re.search(r'\bST[O0]P\b', upper_full) or "STOP" in upper_full:
+    # Rule A: Stop Sign (Tolerates 0 vs O substitution e.g. ST0P, STDP)
+    if re.search(r'\bST[O0D]P\b', upper_full) or "STOP" in upper_full or "ST0P" in upper_full:
         return "STOP", max(avg_conf, 0.95)
 
-    # Rule B: Road Work Sign (Tolerates 0 vs O substitution e.g. R0AD W0RK)
-    if (re.search(r'R[O0]AD', upper_full) and re.search(r'W[O0]RK', upper_full)) or ("ROAD" in upper_full and "WORK" in upper_full):
+    # Rule B: Road Work Sign (Tolerates optical noise e.g. RAD IOAK AHEAD, ROAD WORK, etc.)
+    road_tokens = ["ROAD", "RAD", "ROD", "R0AD"]
+    work_tokens = ["WORK", "W0RK", "WRK", "WOAK", "IOAK", "OAK", "WURK", "WDRK"]
+    is_road = any(t in upper_full for t in road_tokens)
+    is_work = any(t in upper_full for t in work_tokens)
+    is_ahead = "AHEAD" in upper_full or "AHED" in upper_full or "HEAD" in upper_full
+
+    if (is_road and is_work) or (is_work and is_ahead) or (is_road and is_ahead) or ("ROAD WORK" in upper_full) or ("WORK AHEAD" in upper_full):
         return "ROAD WORK AHEAD", max(avg_conf, 0.95)
 
     # Rule C: Speed Limit Sign (Tolerates 3 vs E, 1 vs I substitution)
-    speed_match = re.search(r'SP[E3]{2}D\s*L[I1|]M[I1|]T\s*(\d+)', upper_full) or re.search(r'SPEED\s*LIMIT\s*(\d+)', upper_full)
-    if speed_match:
-        return f"SPEED LIMIT {speed_match.group(1)}", max(avg_conf, 0.95)
-    elif "LIMIT" in upper_full or re.search(r'L[I1|]M[I1|]T', upper_full):
-        digits = re.findall(r'\b\d+\b', upper_full)
-        if digits:
-            return f"SPEED LIMIT {digits[-1]}", max(avg_conf, 0.90)
+    is_speed = bool(re.search(r'SP[E3]{2}D', upper_full) or "SPEED" in upper_full)
+    is_limit = bool(re.search(r'L[I1|]M[I1|]T', upper_full) or "LIMIT" in upper_full)
+
+    if is_speed or is_limit:
+        # Match full pattern e.g. SPEED LIMIT 65
+        speed_match = re.search(r'(?:SPEED|LIMIT|SP[E3]{2}D|L[I1|]M[I1|]T)\s*(\d{2})', upper_full)
+        if speed_match:
+            return f"SPEED LIMIT {speed_match.group(1)}", max(avg_conf, 0.95)
+        
+        # Search candidate tokens for 2-digit numbers
+        two_digit_nums = []
+        for c in candidates:
+            found = re.findall(r'\b(\d{2})\b', c[0])
+            two_digit_nums.extend(found)
+
+        if not two_digit_nums:
+            two_digit_nums = re.findall(r'\b(\d{2})\b', upper_full)
+
+        if two_digit_nums:
+            return f"SPEED LIMIT {two_digit_nums[-1]}", max(avg_conf, 0.95)
+        elif is_speed and is_limit:
+            return "SPEED LIMIT", max(avg_conf, 0.90)
 
     # Rule D: Advisory Speed Plaque (Digits only, e.g. 35)
-    if len(candidates) == 1 and candidates[0][0].isdigit():
-        return candidates[0][0], max(avg_conf, 0.95)
+    digits_candidates = [c[0].strip() for c in candidates if re.match(r'^\d+$', c[0].strip())]
+    if len(digits_candidates) == 1 and len(candidates) <= 2:
+        return digits_candidates[0], max(avg_conf, 0.95)
+    if re.match(r'^\d+$', upper_full.replace(' ', '')):
+        return upper_full.replace(' ', ''), max(avg_conf, 0.95)
 
     # Rule E: Chinese License Plates (Keep province character: 京 A·12345, 沪 B·88888)
     for c in candidates:
@@ -138,18 +171,21 @@ def clean_and_normalize(raw_results):
                 cleaned = re.sub(r'[^\w\u4e00-\u9fff·]', '', text)
                 return cleaned, max(c[1], 0.90)
 
-    # Rule F: US License Plates (Strip state name and banners)
-    # Look for alphanumeric plate string (e.g. 7ABC123, JHT 2951, 5XYZ891)
+    # Rule F: US License Plates (Strip state name, slogans and banners)
     filtered = []
     for text, conf in candidates:
         norm_token = re.sub(r'[^A-Z0-9]', '', text.upper())
-        # If it's a known state banner, drop it
+        # If it's a known state banner or fragment, drop it
         if norm_token in US_BANNERS:
             continue
-        # Drop slogan words
-        if norm_token in ['STATE', 'THE', 'PLATE', 'USA']:
+        if any(norm_token.startswith(p) or norm_token.endswith(p) for p in ['CALIF', 'CHITF', 'FORNIA', 'NEWYORK', 'TEXAS', 'FLORIDA']):
             continue
-        filtered.append(text)
+        # Drop slogan words
+        if norm_token in ['STATE', 'THE', 'PLATE', 'USA', 'AMERICA', 'GARDEN', 'CENTENNIAL']:
+            continue
+        # Clean common OCR glitches in alphanumeric plate strings
+        cleaned_token = text.replace('+', 'A')
+        filtered.append(cleaned_token)
 
     if filtered:
         final_text = " ".join(filtered)

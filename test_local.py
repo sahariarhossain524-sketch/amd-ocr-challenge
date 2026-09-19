@@ -2,7 +2,8 @@ import os
 import json
 import subprocess
 import sys
-from PIL import Image, ImageDraw, ImageFont
+import cv2
+import numpy as np
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INPUT_DIR = os.path.join(BASE_DIR, "input")
@@ -12,53 +13,32 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # Generate synthetic sample test images to simulate the challenge categories
 def create_sample_images():
+    # Format: filename, text_lines, (width, height), bg_color_bgr, text_color_bgr
     samples = [
-        ("image_01.png", "CALIFORNIA\n7ABC123", (600, 300), (255, 255, 255), (0, 0, 0)),
-        ("image_06.png", "STOP", (400, 400), (220, 20, 60), (255, 255, 255)),
-        ("image_08.jpg", "SPEED\nLIMIT\n65", (400, 500), (255, 255, 255), (0, 0, 0)),
-        ("image_09.png", "ROAD\nWORK\nAHEAD", (500, 500), (255, 140, 0), (0, 0, 0)),
-        ("image_10.tiff", "35", (400, 400), (255, 215, 0), (0, 0, 0)),
+        ("image_01.png", ["CALIFORNIA", "7ABC123"], (600, 300), (255, 255, 255), (20, 20, 20)),
+        ("image_06.png", ["STOP"], (400, 400), (40, 40, 220), (255, 255, 255)),
+        ("image_08.jpg", ["SPEED", "LIMIT", "65"], (400, 500), (255, 255, 255), (20, 20, 20)),
+        ("image_09.png", ["ROAD", "WORK", "AHEAD"], (500, 500), (0, 140, 255), (20, 20, 20)),
+        ("image_10.tiff", ["35"], (400, 400), (0, 215, 255), (20, 20, 20)),
     ]
 
-    # Find TrueType font or load scaled font
-    font = None
-    font_candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
-        "DejaVuSans.ttf",
-        "arial.ttf"
-    ]
-    for fpath in font_candidates:
-        if os.path.exists(fpath):
-            try:
-                font = ImageFont.truetype(fpath, 42)
-                break
-            except Exception:
-                pass
+    for fname, lines, (w, h), bg_color, text_color in samples:
+        img = np.full((h, w, 3), bg_color, dtype=np.uint8)
+        font = cv2.FONT_HERSHEY_DUPLEX
+        font_scale = 1.3
+        thickness = 2
 
-    if font is None:
-        try:
-            font = ImageFont.load_default(size=42)
-        except TypeError:
-            font = None
+        total_lines = len(lines)
+        step_y = h // (total_lines + 1)
 
-    for fname, text, size, bg_color, text_color in samples:
+        for i, line in enumerate(lines):
+            text_size, _ = cv2.getTextSize(line, font, font_scale, thickness)
+            text_x = (w - text_size[0]) // 2
+            text_y = (i + 1) * step_y + (text_size[1] // 2)
+            cv2.putText(img, line, (text_x, text_y), font, font_scale, text_color, thickness, cv2.LINE_AA)
+
         path = os.path.join(INPUT_DIR, fname)
-        img = Image.new('RGB', size, color=bg_color)
-        draw = ImageDraw.Draw(img)
-        if font is not None:
-            draw.text((40, 50), text, fill=text_color, font=font)
-        else:
-            # Fallback: draw with default font on small canvas then upscale
-            small_w, small_h = max(size[0] // 3, 50), max(size[1] // 3, 50)
-            small_img = Image.new('RGB', (small_w, small_h), color=bg_color)
-            small_draw = ImageDraw.Draw(small_img)
-            small_draw.text((15, 15), text, fill=text_color)
-            resample_mode = getattr(Image, 'Resampling', Image).NEAREST
-            img = small_img.resize(size, resample_mode)
-        img.save(path)
+        cv2.imwrite(path, img)
         print(f"Generated sample: {path}")
 
 def normalize(text):

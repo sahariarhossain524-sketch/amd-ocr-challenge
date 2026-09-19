@@ -178,13 +178,26 @@ def clean_and_normalize(raw_results):
         # If it's a known state banner or fragment, drop it
         if norm_token in US_BANNERS:
             continue
-        if any(norm_token.startswith(p) or norm_token.endswith(p) for p in ['CALIF', 'CHITF', 'FORNIA', 'NEWYORK', 'TEXAS', 'FLORIDA']):
+        if any(norm_token.startswith(p) or norm_token.endswith(p) for p in ['CALIF', 'CHITF', 'CHLIF', 'FORNIA', 'NEWYORK', 'TEXAS', 'FLORIDA']):
             continue
         # Drop slogan words
         if norm_token in ['STATE', 'THE', 'PLATE', 'USA', 'AMERICA', 'GARDEN', 'CENTENNIAL']:
             continue
         # Clean common OCR glitches in alphanumeric plate strings
         cleaned_token = text.replace('+', 'A')
+
+        # California standard plate format: 1 digit + 3 letters + 3 digits (e.g. 7ABC123)
+        # Fix optical confusions where digits replace letters in the 3-letter cluster
+        clean_upper = re.sub(r'[^A-Z0-9]', '', cleaned_token.upper())
+        if len(clean_upper) == 7 and clean_upper[0].isdigit() and clean_upper[4:].isdigit():
+            mid = list(clean_upper[1:4])
+            letter_map = {'8': 'B', '6': 'C', '0': 'O', '1': 'I', '5': 'S', '4': 'A'}
+            for idx in range(3):
+                if mid[idx] in letter_map:
+                    mid[idx] = letter_map[mid[idx]]
+            clean_upper = clean_upper[0] + "".join(mid) + clean_upper[4:]
+            cleaned_token = clean_upper
+
         filtered.append(cleaned_token)
 
     if filtered:

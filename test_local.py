@@ -71,8 +71,10 @@ def run_tests():
             print(f"[FAIL] Output file missing for {fname}: {res.stderr}")
 
     total_score = passed * 20
+    max_score = len(test_cases) * 20
     print(f"\n=======================================================")
-    print(f"TOTAL SCORE: {total_score} / 100 on simulated sample set ({passed}/{len(test_cases)} Passed)")
+    print(f"LOCAL TEST SCORE: {total_score} / {max_score} on simulated sample set ({passed}/{len(test_cases)} Passed)")
+    print(f"NOTE: Official challenge uses 10 hidden images (200 pts total) on AMD ROCm cluster.")
     print(f"=======================================================\n")
 
 if __name__ == "__main__":

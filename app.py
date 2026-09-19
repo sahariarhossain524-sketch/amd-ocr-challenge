@@ -108,19 +108,19 @@ def clean_and_normalize(raw_results):
     full_text = " ".join([c[0] for c in candidates]).strip()
     upper_full = full_text.upper()
 
-    # Rule A: Stop Sign
-    if "STOP" in upper_full:
+    # Rule A: Stop Sign (Tolerates 0 vs O substitution e.g. ST0P)
+    if re.search(r'\bST[O0]P\b', upper_full) or "STOP" in upper_full:
         return "STOP", max(avg_conf, 0.95)
 
-    # Rule B: Road Work Sign
-    if "ROAD" in upper_full and "WORK" in upper_full:
+    # Rule B: Road Work Sign (Tolerates 0 vs O substitution e.g. R0AD W0RK)
+    if (re.search(r'R[O0]AD', upper_full) and re.search(r'W[O0]RK', upper_full)) or ("ROAD" in upper_full and "WORK" in upper_full):
         return "ROAD WORK AHEAD", max(avg_conf, 0.95)
 
-    # Rule C: Speed Limit Sign
-    speed_match = re.search(r'SPEED\s*LIMIT\s*(\d+)', upper_full)
+    # Rule C: Speed Limit Sign (Tolerates 3 vs E, 1 vs I substitution)
+    speed_match = re.search(r'SP[E3]{2}D\s*L[I1|]M[I1|]T\s*(\d+)', upper_full) or re.search(r'SPEED\s*LIMIT\s*(\d+)', upper_full)
     if speed_match:
         return f"SPEED LIMIT {speed_match.group(1)}", max(avg_conf, 0.95)
-    elif "LIMIT" in upper_full:
+    elif "LIMIT" in upper_full or re.search(r'L[I1|]M[I1|]T', upper_full):
         digits = re.findall(r'\b\d+\b', upper_full)
         if digits:
             return f"SPEED LIMIT {digits[-1]}", max(avg_conf, 0.90)
@@ -161,14 +161,21 @@ def process_image(input_path):
     reader = get_reader()
     img, enhanced = load_and_enhance_image(input_path)
 
-    # Fast Path 1: High-contrast CLAHE enhanced frame (sufficient for 95%+ of low-light/glare inputs)
+    # Fast Path 1: High-contrast CLAHE enhanced frame (sufficient for low-light/glare inputs)
     results = reader.readtext(enhanced)
 
     # Fast Path 2: Original RGB frame (in case CLAHE masked subtle edge colors)
     if not results or len(results) == 0:
         results = reader.readtext(img)
 
-    # Fallback Path 3: Heavy fastNlMeansDenoising executed ONLY if fast paths return 0 results
+    # Recovery Path 3: Upscaled 1.5x frame (resolves distant/low-res license plates)
+    if not results or len(results) == 0:
+        h, w = enhanced.shape[:2]
+        if max(h, w) < 1600:
+            upscaled = cv2.resize(enhanced, (0, 0), fx=1.5, fy=1.5, interpolation=cv2.INTER_CUBIC)
+            results = reader.readtext(upscaled)
+
+    # Fallback Path 4: Fast Non-Local Means Denoising (for heavy sensor noise)
     if not results or len(results) == 0:
         denoised = denoise_fallback(enhanced)
         results = reader.readtext(denoised)

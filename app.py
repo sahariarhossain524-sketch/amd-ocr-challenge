@@ -49,9 +49,28 @@ def get_reader():
     global _READER
     if _READER is None:
         import easyocr
-        # Initialize with English and Simplified Chinese
         gpu_enabled = (DEVICE == 'cuda')
-        _READER = easyocr.Reader(['en', 'ch_sim'], gpu=gpu_enabled, verbose=False)
+
+        # Check local models directory or /models or ~/.EasyOCR/model
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        local_models = os.path.join(base_dir, "models")
+        if os.path.exists(local_models) and os.path.exists(os.path.join(local_models, "craft_mlt_25k.pth")):
+            model_dir = local_models
+            download_needed = False
+        elif os.path.exists("/models") and os.path.exists("/models/craft_mlt_25k.pth"):
+            model_dir = "/models"
+            download_needed = False
+        else:
+            model_dir = os.path.expanduser("~/.EasyOCR/model")
+            download_needed = True
+
+        _READER = easyocr.Reader(
+            ['en', 'ch_sim'], 
+            gpu=gpu_enabled, 
+            model_storage_directory=model_dir, 
+            download_enabled=download_needed, 
+            verbose=False
+        )
     return _READER
 
 def load_and_enhance_image(image_path):
@@ -251,11 +270,10 @@ def main():
     base_name, _ = os.path.splitext(filename)
     output_filename = f"{base_name}_output.json"
 
-    # Default to /app/output in container, or sibling ../output during local testing
-    if os.path.exists("/app"):
+    # Resolve output directory to sibling output folder relative to input
+    output_dir = os.path.abspath(os.path.join(os.path.dirname(input_path), "..", "output"))
+    if not os.path.exists(output_dir) and os.path.exists("/app/output"):
         output_dir = "/app/output"
-    else:
-        output_dir = os.path.join(os.path.dirname(input_path), "..", "output")
 
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, output_filename)

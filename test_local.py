@@ -62,11 +62,13 @@ def run_tests():
     passed = 0
     for fname, expected in test_cases:
         in_file = os.path.join(INPUT_DIR, fname)
-        cmd = [sys.executable, os.path.join(BASE_DIR, "app.py"), "--input-image", in_file]
-        res = subprocess.run(cmd, capture_output=True, text=True)
-
         base_name, _ = os.path.splitext(fname)
         out_file = os.path.join(OUTPUT_DIR, f"{base_name}_output.json")
+        if os.path.exists(out_file):
+            os.remove(out_file)
+
+        cmd = [sys.executable, os.path.join(BASE_DIR, "app.py"), "--input-image", in_file]
+        res = subprocess.run(cmd, capture_output=True, text=True)
 
         if os.path.exists(out_file):
             with open(out_file, "r", encoding="utf-8") as f:

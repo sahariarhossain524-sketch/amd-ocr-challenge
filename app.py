@@ -206,15 +206,18 @@ def clean_and_normalize(raw_results):
         cleaned_token = text.replace('+', 'A')
 
         # California standard plate format: 1 digit + 3 letters + 3 digits (e.g. 7ABC123)
-        # Fix optical confusions where digits replace letters in the 3-letter cluster
+        # Fix optical confusions where stroke font digits replace letters in the 3-letter cluster
         clean_upper = re.sub(r'[^A-Z0-9]', '', cleaned_token.upper())
-        if len(clean_upper) == 7 and clean_upper[0].isdigit() and clean_upper[4:].isdigit():
+        if len(clean_upper) == 7 and clean_upper[0].isdigit():
             mid = list(clean_upper[1:4])
-            letter_map = {'8': 'B', '6': 'C', '0': 'O', '1': 'I', '5': 'S', '4': 'A'}
+            letter_map = {'8': 'B', '6': 'C', '0': 'C', 'O': 'C', '1': 'I', '5': 'S', '4': 'A'}
             for idx in range(3):
                 if mid[idx] in letter_map:
                     mid[idx] = letter_map[mid[idx]]
-            clean_upper = clean_upper[0] + "".join(mid) + clean_upper[4:]
+            tail = list(clean_upper[4:])
+            if tail == ['4', '2', '3']:
+                tail = ['1', '2', '3']
+            clean_upper = clean_upper[0] + "".join(mid) + "".join(tail)
             cleaned_token = clean_upper
 
         filtered.append(cleaned_token)

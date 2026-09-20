@@ -175,11 +175,11 @@ def clean_and_normalize(raw_results):
         elif is_speed and is_limit:
             return "SPEED LIMIT", max(avg_conf, 0.90)
 
-    # Rule D: Advisory Speed Plaque (Digits only, e.g. 35)
-    digits_candidates = [c[0].strip() for c in candidates if re.match(r'^\d+$', c[0].strip())]
+    # Rule D: Advisory Speed Plaque (1-3 digits only, e.g. 35, 45, 15 - not 7-char plates)
+    digits_candidates = [c[0].strip() for c in candidates if re.match(r'^\d{1,3}$', c[0].strip())]
     if len(digits_candidates) == 1 and len(candidates) <= 2:
         return digits_candidates[0], max(avg_conf, 0.95)
-    if re.match(r'^\d+$', upper_full.replace(' ', '')):
+    if re.match(r'^\d{1,3}$', upper_full.replace(' ', '')):
         return upper_full.replace(' ', ''), max(avg_conf, 0.95)
 
     # Rule E: Chinese License Plates (Keep province character: 京 A·12345, 沪 B·88888)

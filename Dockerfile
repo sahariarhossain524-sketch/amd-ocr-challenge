@@ -13,8 +13,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Pre-download OCR model weights to ensure instantaneous inference under 30s limit
-RUN python3 -c "import easyocr; reader = easyocr.Reader(['en', 'ch_sim'], gpu=False)"
+# Copy pre-baked OCR model weights to /models (AMD official specification) and /app/models
+COPY models /models
+COPY models /app/models
+
+# Populate ~/.EasyOCR/model for seamless offline execution
+RUN mkdir -p /root/.EasyOCR/model && cp /models/* /root/.EasyOCR/model/
 
 # Copy application code
 COPY app.py /app/app.py

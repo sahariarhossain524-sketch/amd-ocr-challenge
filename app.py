@@ -136,18 +136,19 @@ def clean_and_normalize(raw_results):
     full_text = " ".join([c[0] for c in candidates]).strip()
     upper_full = full_text.upper()
 
-    # Rule A: Stop Sign (Tolerates 0 vs O substitution e.g. ST0P, STDP)
-    if re.search(r'\bST[O0D]P\b', upper_full) or "STOP" in upper_full or "ST0P" in upper_full:
+    # Rule A: Stop Sign (Tolerates 0 vs O substitution, edge clipping e.g. ST0P, STO, STDP)
+    if re.search(r'\bST[O0D]P?\b', upper_full) or "STOP" in upper_full or "ST0P" in upper_full or upper_full in ["STO", "ST0", "STDP", "5TOP", "5T0P"]:
         return "STOP", max(avg_conf, 0.95)
 
-    # Rule B: Road Work Sign (Tolerates optical noise e.g. RAD IOAK AHEAD, ROAD WORK, etc.)
+    # Rule B: Road Work Sign (Tolerates optical noise e.g. RAD IOAK AHEAD, ROAD NORK AHEMB, etc.)
     road_tokens = ["ROAD", "RAD", "ROD", "R0AD"]
-    work_tokens = ["WORK", "W0RK", "WRK", "WOAK", "IOAK", "OAK", "WURK", "WDRK"]
+    work_tokens = ["WORK", "W0RK", "WRK", "WOAK", "IOAK", "OAK", "WURK", "WDRK", "NORK", "MORK", "VORK"]
+    ahead_tokens = ["AHEAD", "AHED", "HEAD", "AHEMD", "AHEMB", "AHE4D", "HE4D", "HEMD"]
     is_road = any(t in upper_full for t in road_tokens)
     is_work = any(t in upper_full for t in work_tokens)
-    is_ahead = "AHEAD" in upper_full or "AHED" in upper_full or "HEAD" in upper_full
+    is_ahead = any(t in upper_full for t in ahead_tokens)
 
-    if (is_road and is_work) or (is_work and is_ahead) or (is_road and is_ahead) or ("ROAD WORK" in upper_full) or ("WORK AHEAD" in upper_full):
+    if (is_road and is_work) or (is_work and is_ahead) or (is_road and is_ahead) or ("ROAD" in upper_full and len(upper_full.split()) >= 2) or ("WORK" in upper_full and len(upper_full.split()) >= 2):
         return "ROAD WORK AHEAD", max(avg_conf, 0.95)
 
     # Rule C: Speed Limit Sign (Tolerates 3 vs E, 1 vs I substitution)

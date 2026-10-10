@@ -33,3 +33,4 @@ jobs:
           tags: |
             ghcr.io/sahariarhossain524-sketch/amd-ocr-challenge:latest
             ghcr.io/sahariarhossain524-sketch/amd-ocr-challenge:v2
+            ghcr.io/sahariarhossain524-sketch/amd-ocr-challenge:v3

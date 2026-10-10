@@ -274,10 +274,11 @@ def main():
     base_name, _ = os.path.splitext(filename)
     output_filename = f"{base_name}_output.json"
 
-    # Resolve output directory to sibling output folder relative to input
-    output_dir = os.path.abspath(os.path.join(os.path.dirname(input_path), "..", "output"))
-    if not os.path.exists(output_dir) and os.path.exists("/app/output"):
+    # Always prioritize standard /app/output as required by AMD evaluation contract
+    if os.path.exists("/app/output"):
         output_dir = "/app/output"
+    else:
+        output_dir = os.path.abspath(os.path.join(os.path.dirname(input_path), "..", "output"))
 
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, output_filename)

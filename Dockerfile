@@ -26,4 +26,5 @@ COPY app.py /app/app.py
 # Ensure standard input/output directories exist
 RUN mkdir -p /app/input /app/output
 
-CMD ["python3", "/app/app.py", "--help"]
+# Standard daemon command to keep container alive for docker exec
+CMD ["sleep", "infinity"]

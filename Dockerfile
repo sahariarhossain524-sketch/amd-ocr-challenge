@@ -13,6 +13,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
+# Explicitly verify PyTorch is still the official ROCm build
+RUN python3 -c "import torch; assert '+rocm' in torch.__version__, f'Fatal: PyTorch overwritten by non-ROCm version: {torch.__version__}'; print('ROCm PyTorch Verified:', torch.__version__)"
+
 # Copy pre-baked OCR model weights to /models (AMD official specification) and /app/models
 COPY models /models
 COPY models /app/models

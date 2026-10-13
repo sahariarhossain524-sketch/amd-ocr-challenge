@@ -83,8 +83,9 @@ def enhance_frames(image_path):
     """Generates enhanced candidate frames for robust multi-pass OCR."""
     pil_img = Image.open(image_path).convert('RGB')
     img_rgb = np.array(pil_img)
-    img = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+    orig = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
 
+    img = orig.copy()
     h, w = img.shape[:2]
     if h < 600 or w < 800:
         scale = max(2.0, min(1200.0 / max(h, 1), 1600.0 / max(w, 1)))
@@ -100,10 +101,10 @@ def enhance_frames(image_path):
     blurred = cv2.GaussianBlur(img, (0, 0), 1.5)
     sharpened = cv2.addWeighted(img, 2.0, blurred, -1.0, 0)
 
-    # 3. Denoised (for additive sensor noise)
-    denoised = cv2.fastNlMeansDenoising(enhanced, None, h=10, templateWindowSize=7, searchWindowSize=21)
+    # 3. Denoised via fast bilateral filter (sub-second latency, zero CPU hangs)
+    denoised = cv2.bilateralFilter(enhanced, 5, 50, 50)
 
-    return img, enhanced, sharpened, denoised
+    return orig, img, enhanced, sharpened, denoised
 
 def correct_california_plate(token):
     """
@@ -203,9 +204,9 @@ def clean_and_normalize(raw_results, img=None):
     upper_compact = upper_full.replace(" ", "")
 
     # Token check for Stop Sign
-    if ("STOP" in upper_compact or "ST0P" in upper_compact or 
-        upper_compact in ["STOP", "ST0P", "SOP", "TOP", "STP", "SIOP", "STDP", "5TOP", "5T0P", "STO", "ST0"] or 
-        re.search(r'\bST[O0D]P?\b', upper_full) or re.search(r'S\s*T\s*[O0]\s*P', upper_full)):
+    if ("STOP" in upper_compact or "ST0P" in upper_compact or "STOR" in upper_compact or "ST0R" in upper_compact or
+        upper_compact in ["STOP", "ST0P", "STOR", "ST0R", "SOP", "TOP", "STP", "SIOP", "STDP", "5TOP", "5T0P", "STO", "ST0"] or 
+        re.search(r'\bST[O0D][PR]?\b', upper_full) or re.search(r'S\s*T\s*[O0]\s*[PR]', upper_full)):
         return "STOP", max(avg_conf, 0.95)
 
     # Token check for Road Work
@@ -256,6 +257,18 @@ def clean_and_normalize(raw_results, img=None):
     if has_chinese_prov:
         chinese_tokens = [re.sub(r'[^\w\u4e00-\u9fff·]', '', c[0]) for c in candidates]
         combined_chinese = "".join(chinese_tokens).strip()
+        # In Chinese license plates (GA 36-2018), position 0 is province character, position 1 MUST be an uppercase letter!
+        # If OCR confused 'B' with '8' or 'D' with '0', correct it deterministically
+        if len(combined_chinese) >= 2 and combined_chinese[0] in CHINESE_PROVINCES:
+            ch_list = list(combined_chinese)
+            if ch_list[1] == '8':
+                ch_list[1] = 'B'
+            elif ch_list[1] == '0':
+                ch_list[1] = 'D'
+            elif ch_list[1] == '1':
+                ch_list[1] = 'I'
+            combined_chinese = "".join(ch_list)
+
         # Ensure middle dot formatting if present
         if "京" in combined_chinese and "12345" in combined_chinese:
             return "京A·12345", 0.99
@@ -306,11 +319,12 @@ def process_image(input_path):
         reader = get_reader()
         if reader is None:
             return "UNKNOWN", 0.0
-        img, enhanced, sharpened, denoised = enhance_frames(input_path)
+        orig, img, enhanced, sharpened, denoised = enhance_frames(input_path)
 
-        # Multi-pass execution: RGB first for clean edge preservation, then CLAHE, then Sharpened
+        # Multi-pass execution: Original unscaled first (fastest, preserves fine character detail), then Scaled RGB, then CLAHE
         passes = [
-            ("rgb", img),
+            ("original", orig),
+            ("rgb_scaled", img),
             ("enhanced", enhanced),
             ("sharpened", sharpened),
             ("denoised", denoised)

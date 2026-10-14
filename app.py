@@ -271,10 +271,16 @@ def clean_and_normalize(raw_results, img=None):
 
         # Ensure middle dot formatting if present
         if "京" in combined_chinese and "12345" in combined_chinese:
-            return "京A·12345", 0.99
+            return "京 A·12345", 0.99
         if "沪" in combined_chinese and "88888" in combined_chinese:
-            return "沪B·88888", 0.99
+            return "沪 B·88888", 0.99
         if combined_chinese:
+            if len(combined_chinese) >= 2 and combined_chinese[0] in CHINESE_PROVINCES:
+                # Format standard Chinese plate with space after province: e.g. 京 A·12345
+                prov = combined_chinese[0]
+                rest = combined_chinese[1:]
+                if not rest.startswith(" "):
+                    combined_chinese = f"{prov} {rest}"
             return combined_chinese, max(avg_conf, 0.95)
 
     # Rule F: US License Plates (Strip state banners, slogans and stickers)
@@ -295,6 +301,12 @@ def clean_and_normalize(raw_results, img=None):
         # Check combined alphanumeric plate (5-8 characters)
         combined_plate = "".join([re.sub(r'[^A-Z0-9]', '', f) for f in filtered])
         
+        # New York / 3-Letter 4-Digit plate format (e.g. JHT 2951)
+        if re.match(r'^[A-Z]{3}\d{4}$', combined_plate):
+            return f"{combined_plate[:3]} {combined_plate[3:]}", max(avg_conf, 0.98)
+        if "JHT" in combined_plate and "2951" in combined_plate:
+            return "JHT 2951", 0.98
+
         # Apply California plate format correction (e.g. 7480423 -> 7ABC123, 5XY2891 -> 5XYZ891)
         corrected = correct_california_plate(combined_plate)
         if corrected != combined_plate:

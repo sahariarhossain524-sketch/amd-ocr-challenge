@@ -106,86 +106,65 @@ def enhance_frames(image_path):
 
     return orig, img, enhanced, sharpened, denoised
 
-def correct_california_plate(token):
+def correct_california_plate(token, has_ca_context=False):
     """
     Recovers standard California passenger vehicle format: 1 Digit + 3 Letters + 3 Digits (e.g. 7ABC123, 5XYZ891).
-    Corrects OCR confusions in letter vs digit positions.
+    Only disambiguates positions if context or pattern strongly matches California format.
     """
     clean = re.sub(r'[^A-Z0-9]', '', token.upper())
     if len(clean) != 7:
         return token
 
-    # Must start with a digit
-    if not clean[0].isdigit():
+    # Check if already a perfect valid CA plate
+    if re.match(r'^\d[A-Z]{3}\d{3}$', clean):
+        return clean
+
+    # Only attempt correction if California context exists or it starts with a digit and has letters
+    if not (has_ca_context or (clean[0].isdigit() and sum(c.isalpha() for c in clean[1:4]) >= 2)):
         return token
 
-    # Last 3 must be digits
     d_map = {'A': '4', 'B': '8', 'O': '0', 'D': '0', 'I': '1', 'L': '1', 'Z': '2', 'S': '5', 'G': '6'}
-    l_map = {'4': 'A', '8': 'B', '0': 'C', '6': 'C', '1': 'I', '2': 'Z', '5': 'S', '7': 'Z'}
+    l_map = {'4': 'A', '8': 'B', '0': 'O', '6': 'C', '1': 'I', '2': 'Z', '5': 'S', '7': 'Z'}
 
     chars = list(clean)
+    # Position 0 must be digit
+    if not chars[0].isdigit() and chars[0] in d_map:
+        chars[0] = d_map[chars[0]]
 
-    # Positions 1, 2, 3 MUST be letters
+    # Positions 1, 2, 3 should be letters
     for i in (1, 2, 3):
         if chars[i].isdigit() and chars[i] in l_map:
             chars[i] = l_map[chars[i]]
 
-    # Positions 4, 5, 6 MUST be digits
+    # Positions 4, 5, 6 should be digits
     for i in (4, 5, 6):
         if not chars[i].isdigit() and chars[i] in d_map:
             chars[i] = d_map[chars[i]]
 
     result = "".join(chars)
-    # Check if format \d[A-Z]{3}\d{3} is satisfied
-    if result.startswith("7ABC"):
-        return "7ABC123"
-    if result.startswith("5XYZ"):
-        return "5XYZ891"
     if re.match(r'^\d[A-Z]{3}\d{3}$', result):
         return result
     return token
 
 def clean_and_normalize(raw_results, img=None):
     """
-    Normalizes text according to Section 2 specification:
-    - Drops state banners (CALIFORNIA, NEW YORK, EXCELSIOR)
+    Normalizes text according to Mini-Challenge 2 specification:
+    - Drops state banners (CALIFORNIA, NEW YORK, EXCELSIOR, etc.)
     - Drops year/month stickers (2024, OCT)
-    - Retains Chinese province characters (京, 沪)
+    - Retains Chinese province characters (京, 沪, 粤, etc.)
     - Formats Road Signs (STOP, SPEED LIMIT <num>, ROAD WORK AHEAD, <num>)
+    - ZERO HARDCODING. Everything extracted dynamically from image.
     """
-    # Color analysis on original image
-    red_ratio = 0.0
-    orange_ratio = 0.0
-    yellow_ratio = 0.0
-
-    if img is not None:
-        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-        total_pixels = img.shape[0] * img.shape[1]
-
-        # Red mask (STOP sign)
-        mask_red = cv2.inRange(hsv, np.array([0, 70, 50]), np.array([10, 255, 255])) | \
-                   cv2.inRange(hsv, np.array([170, 70, 50]), np.array([180, 255, 255]))
-        red_ratio = np.count_nonzero(mask_red) / total_pixels
-
-        # Pure Work Zone Orange mask (ROAD WORK AHEAD sign: Hue 8 to 19)
-        mask_orange = cv2.inRange(hsv, np.array([8, 100, 100]), np.array([19, 255, 255]))
-        orange_ratio = np.count_nonzero(mask_orange) / total_pixels
-
-        # Yellow mask (Advisory speed plaque: Hue 21 to 35)
-        mask_yellow = cv2.inRange(hsv, np.array([21, 80, 80]), np.array([35, 255, 255]))
-        yellow_ratio = np.count_nonzero(mask_yellow) / total_pixels
-
-    # Rule A: Stop Sign (Color + Shape / Token verification)
-    if red_ratio > 0.15:
-        return "STOP", 0.99
-
-    # Rule B: Work Zone / Warning Sign (Pure Orange background)
-    if orange_ratio > 0.15:
-        return "ROAD WORK AHEAD", 0.99
-
     if not raw_results:
-        if yellow_ratio > 0.15:
-            return "35", 0.95
+        # Last resort fallback if all OCR passes failed
+        if img is not None:
+            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+            total_pixels = img.shape[0] * img.shape[1]
+            mask_red = cv2.inRange(hsv, np.array([0, 90, 70]), np.array([10, 255, 255])) | \
+                       cv2.inRange(hsv, np.array([170, 90, 70]), np.array([180, 255, 255]))
+            red_ratio = np.count_nonzero(mask_red) / total_pixels
+            if red_ratio > 0.35: # Only if massive red dominance
+                return "STOP", 0.60
         return "UNKNOWN", 0.0
 
     candidates = []
@@ -198,95 +177,110 @@ def clean_and_normalize(raw_results, img=None):
             candidates.append((text, conf))
             total_conf += conf
 
-    avg_conf = round(total_conf / max(len(candidates), 1), 2)
+    if not candidates:
+        return "UNKNOWN", 0.0
+
+    avg_conf = round(total_conf / len(candidates), 2)
     full_text = " ".join([c[0] for c in candidates]).strip()
     upper_full = full_text.upper()
     upper_compact = upper_full.replace(" ", "")
 
-    # Token check for Stop Sign
-    if ("STOP" in upper_compact or "ST0P" in upper_compact or "STOR" in upper_compact or "ST0R" in upper_compact or
-        upper_compact in ["STOP", "ST0P", "STOR", "ST0R", "SOP", "TOP", "STP", "SIOP", "STDP", "5TOP", "5T0P", "STO", "ST0"] or 
-        re.search(r'\bST[O0D][PR]?\b', upper_full) or re.search(r'S\s*T\s*[O0]\s*[PR]', upper_full)):
+    # Check for California context
+    has_ca_context = any(b in upper_full for b in ['CALIFORNIA', 'CALIF', 'DMV', 'CA'])
+
+    # -------------------------------------------------------------
+    # 1. STOP SIGN
+    # -------------------------------------------------------------
+    stop_patterns = ["STOP", "ST0P", "STOR", "STDP", "STP", "SIOP", "5TOP", "5T0P", "SOP"]
+    is_stop = any(p in upper_compact for p in stop_patterns) or bool(re.search(r'\bST[O0D][PR]?\b', upper_full))
+    if is_stop and not any(k in upper_full for k in ["SPEED", "LIMIT", "ROAD", "WORK", "AHEAD"]):
         return "STOP", max(avg_conf, 0.95)
 
-    # Token check for Road Work
-    road_tokens = ["ROAD", "RAD", "ROD", "R0AD"]
-    work_tokens = ["WORK", "W0RK", "WRK", "WOAK", "IOAK", "OAK", "WURK", "WDRK", "NORK", "MORK", "VORK"]
-    ahead_tokens = ["AHEAD", "AHED", "HEAD", "AHEMD", "AHEMB", "AHE4D", "HE4D", "HEMD", "AHE40", "AHE"]
-    is_road = any(t in upper_full for t in road_tokens)
-    is_work = any(t in upper_full for t in work_tokens)
-    is_ahead = any(t in upper_full for t in ahead_tokens)
+    # -------------------------------------------------------------
+    # 2. WORK ZONE & ROAD SIGNS (e.g. ROAD WORK AHEAD, DETOUR, SLOW)
+    # -------------------------------------------------------------
+    road_words = ["ROAD", "RAD", "ROD", "R0AD"]
+    work_words = ["WORK", "W0RK", "WRK", "WOAK"]
+    ahead_words = ["AHEAD", "AHED", "HEAD", "AHEMD"]
+    is_road = any(w in upper_full for w in road_words)
+    is_work = any(w in upper_full for w in work_words)
+    is_ahead = any(w in upper_full for w in ahead_words)
 
     if (is_road and is_work) or (is_work and is_ahead) or (is_road and is_ahead):
         return "ROAD WORK AHEAD", max(avg_conf, 0.95)
 
-    # Rule C: Speed Limit Sign
+    if "DETOUR" in upper_full:
+        return "DETOUR", max(avg_conf, 0.95)
+
+    # -------------------------------------------------------------
+    # 3. SPEED LIMIT SIGN (e.g. SPEED LIMIT 65, SPEED LIMIT 45)
+    # -------------------------------------------------------------
     is_speed = bool(re.search(r'SP[E3]{2}D', upper_full) or "SPEED" in upper_full)
     is_limit = bool(re.search(r'L[I1|]M[I1|]T', upper_full) or "LIMIT" in upper_full)
 
     if is_speed or is_limit:
-        speed_match = re.search(r'(?:SPEED|LIMIT|SP[E3]{2}D|L[I1|]M[I1|]T)\s*(\d{2})', upper_full)
-        if speed_match:
-            return f"SPEED LIMIT {speed_match.group(1)}", max(avg_conf, 0.95)
-        
+        speed_m = re.search(r'(?:SPEED|LIMIT|SP[E3]{2}D|L[I1|]M[I1|]T)\s*(\d{2})', upper_full)
+        if speed_m:
+            return f"SPEED LIMIT {speed_m.group(1)}", max(avg_conf, 0.95)
+
         two_digit_nums = []
         for c in candidates:
             found = re.findall(r'\b(\d{2})\b', c[0])
             two_digit_nums.extend(found)
-        if not two_digit_nums:
-            two_digit_nums = re.findall(r'\b(\d{2})\b', upper_full)
-
         if two_digit_nums:
             return f"SPEED LIMIT {two_digit_nums[-1]}", max(avg_conf, 0.95)
-        elif is_speed and is_limit:
-            return "SPEED LIMIT 65", max(avg_conf, 0.90)
 
-    # Rule D: Advisory Speed Plaque (Standalone 1-3 digits)
-    digits_candidates = [c[0].strip() for c in candidates if re.match(r'^\d{1,3}$', c[0].strip())]
-    if len(digits_candidates) == 1 and len(candidates) <= 2:
-        return digits_candidates[0], max(avg_conf, 0.95)
-    if re.match(r'^\d{1,3}$', upper_full.replace(' ', '')):
-        return upper_full.replace(' ', ''), max(avg_conf, 0.95)
+    # -------------------------------------------------------------
+    # 4. ADVISORY SPEED PLAQUE (e.g. 35, 45, 25 - standalone digits)
+    # -------------------------------------------------------------
+    clean_tokens = [c[0].strip() for c in candidates if c[0].strip()]
+    digit_tokens = [t for t in clean_tokens if re.match(r'^\d{1,3}$', t)]
+    non_digit_tokens = [t for t in clean_tokens if not re.match(r'^\d{1,3}$', t) and t.upper() not in US_BANNERS]
 
-    # Rule E: Chinese License Plates (Keep province character: 京 A·12345, 沪 B·88888)
+    if digit_tokens and not non_digit_tokens:
+        return digit_tokens[0], max(avg_conf, 0.95)
+
+    # -------------------------------------------------------------
+    # 5. CHINESE LICENSE PLATES (e.g. 京 A·12345, 沪 B·88888, 粤 B12345)
+    # -------------------------------------------------------------
     has_chinese_prov = False
+    prov_char = None
     for c in candidates:
-        if any(prov in c[0] for prov in CHINESE_PROVINCES):
-            has_chinese_prov = True
+        for prov in CHINESE_PROVINCES:
+            if prov in c[0]:
+                has_chinese_prov = True
+                prov_char = prov
+                break
+        if has_chinese_prov:
             break
-    if has_chinese_prov:
+
+    if has_chinese_prov and prov_char:
         chinese_tokens = [re.sub(r'[^\w\u4e00-\u9fff·]', '', c[0]) for c in candidates]
         combined_chinese = "".join(chinese_tokens).strip()
-        # In Chinese license plates (GA 36-2018), position 0 is province character, position 1 MUST be an uppercase letter!
-        # If OCR confused 'B' with '8' or 'D' with '0', correct it deterministically
-        if len(combined_chinese) >= 2 and combined_chinese[0] in CHINESE_PROVINCES:
-            ch_list = list(combined_chinese)
-            if ch_list[1] == '8':
-                ch_list[1] = 'B'
-            elif ch_list[1] == '0':
-                ch_list[1] = 'D'
-            elif ch_list[1] == '1':
-                ch_list[1] = 'I'
-            combined_chinese = "".join(ch_list)
 
-        # Ensure middle dot formatting if present
-        if "京" in combined_chinese and "12345" in combined_chinese:
-            return "京 A·12345", 0.99
-        if "沪" in combined_chinese and "88888" in combined_chinese:
-            return "沪 B·88888", 0.99
-        if combined_chinese:
-            if len(combined_chinese) >= 2 and combined_chinese[0] in CHINESE_PROVINCES:
-                # Format standard Chinese plate with space after province: e.g. 京 A·12345
-                prov = combined_chinese[0]
-                rest = combined_chinese[1:]
+        prov_idx = combined_chinese.find(prov_char)
+        if prov_idx != -1:
+            plate_sub = combined_chinese[prov_idx:]
+            if len(plate_sub) >= 2:
+                p_list = list(plate_sub)
+                if len(p_list) > 1 and p_list[1] in {'8': 'B', '0': 'D', '1': 'I'}:
+                    p_list[1] = {'8': 'B', '0': 'D', '1': 'I'}[p_list[1]]
+                cleaned_plate = "".join(p_list)
+                
+                prov = cleaned_plate[0]
+                rest = cleaned_plate[1:]
                 if not rest.startswith(" "):
-                    combined_chinese = f"{prov} {rest}"
-            return combined_chinese, max(avg_conf, 0.95)
+                    cleaned_plate = f"{prov} {rest}"
+                return cleaned_plate, max(avg_conf, 0.95)
 
-    # Rule F: US License Plates (Strip state banners, slogans and stickers)
+    # -------------------------------------------------------------
+    # 6. US / GENERAL LICENSE PLATES
+    # -------------------------------------------------------------
     filtered = []
     for text, conf in candidates:
         norm_token = re.sub(r'[^A-Z0-9]', '', text.upper())
+        if not norm_token:
+            continue
         if norm_token in US_BANNERS or norm_token in STICKER_TOKENS:
             continue
         if any(norm_token.startswith(p) or norm_token.endswith(p) for p in ['CALIF', 'CHITF', 'CHLIF', 'FORNIA', 'NEWYORK', 'TEXAS', 'FLORIDA']):
@@ -298,30 +292,38 @@ def clean_and_normalize(raw_results, img=None):
         filtered.append(cleaned_token)
 
     if filtered:
-        # Check combined alphanumeric plate (5-8 characters)
         combined_plate = "".join([re.sub(r'[^A-Z0-9]', '', f) for f in filtered])
-        
+
         # New York / 3-Letter 4-Digit plate format (e.g. JHT 2951)
         if re.match(r'^[A-Z]{3}\d{4}$', combined_plate):
             return f"{combined_plate[:3]} {combined_plate[3:]}", max(avg_conf, 0.98)
-        if "JHT" in combined_plate and "2951" in combined_plate:
-            return "JHT 2951", 0.98
 
-        # Apply California plate format correction (e.g. 7480423 -> 7ABC123, 5XY2891 -> 5XYZ891)
-        corrected = correct_california_plate(combined_plate)
+        # Check for 3 Letters + 4 Digits separated
+        if len(filtered) == 2:
+            f0 = re.sub(r'[^A-Z0-9]', '', filtered[0].upper())
+            f1 = re.sub(r'[^A-Z0-9]', '', filtered[1].upper())
+            if re.match(r'^[A-Z]{3}$', f0) and re.match(r'^\d{4}$', f1):
+                return f"{f0} {f1}", max(avg_conf, 0.98)
+
+        # Check California plate format with context
+        corrected = correct_california_plate(combined_plate, has_ca_context=has_ca_context)
         if corrected != combined_plate:
-            return corrected, 0.98
+            return corrected, max(avg_conf, 0.98)
 
         for f in filtered:
-            corr_f = correct_california_plate(f)
-            if corr_f != f:
-                return corr_f, 0.98
+            clean_f = re.sub(r'[^A-Z0-9]', '', f.upper())
+            corr_f = correct_california_plate(clean_f, has_ca_context=has_ca_context)
+            if corr_f != clean_f:
+                return corr_f, max(avg_conf, 0.98)
 
+        # General alphanumeric plate (5-8 characters)
         if 5 <= len(combined_plate) <= 8:
             return combined_plate, max(avg_conf, 0.95)
+
         plate_cands = [re.sub(r'[^A-Z0-9]', '', f) for f in filtered if 4 <= len(re.sub(r'[^A-Z0-9]', '', f)) <= 8]
         if plate_cands:
             return plate_cands[0], max(avg_conf, 0.95)
+
         return " ".join(filtered), avg_conf
 
     return full_text, avg_conf
@@ -333,7 +335,6 @@ def process_image(input_path):
             return "UNKNOWN", 0.0
         orig, img, enhanced, sharpened, denoised = enhance_frames(input_path)
 
-        # Multi-pass execution: Original unscaled first (fastest, preserves fine character detail), then Scaled RGB, then CLAHE
         passes = [
             ("original", orig),
             ("rgb_scaled", img),
@@ -342,28 +343,43 @@ def process_image(input_path):
             ("denoised", denoised)
         ]
 
-        best_text = "UNKNOWN"
-        best_conf = 0.0
+        scored_candidates = []
 
         for pass_name, frame in passes:
             try:
                 results = reader.readtext(frame)
                 if results:
                     text, conf = clean_and_normalize(results, img=img)
-                    if text != "UNKNOWN" and len(text) >= 2:
-                        return text, conf
-                    if conf > best_conf:
-                        best_text = text
-                        best_conf = conf
+                    if text != "UNKNOWN" and len(text) >= 1:
+                        score = conf
+                        clean_u = text.upper()
+                        if clean_u in ["STOP", "ROAD WORK AHEAD", "DETOUR"]:
+                            score += 0.4
+                        elif re.match(r'^SPEED LIMIT \d{2}$', clean_u):
+                            score += 0.4
+                        elif re.match(r'^\d{1,3}$', clean_u):
+                            score += 0.35
+                        elif re.match(r'^\d[A-Z]{3}\d{3}$', clean_u):
+                            score += 0.45
+                        elif re.match(r'^[A-Z]{3}\s*\d{4}$', clean_u):
+                            score += 0.45
+                        elif any(prov in text for prov in CHINESE_PROVINCES):
+                            score += 0.45
+                        elif 5 <= len(re.sub(r'[^A-Z0-9]', '', clean_u)) <= 8:
+                            score += 0.25
+                        
+                        scored_candidates.append((score, conf, text))
             except Exception:
                 continue
 
-        # Color fallback if all OCR passes returned empty
-        color_text, color_conf = clean_and_normalize([], img=img)
-        if color_text != "UNKNOWN":
-            return color_text, color_conf
+        if scored_candidates:
+            scored_candidates.sort(key=lambda x: x[0], reverse=True)
+            best_score, best_conf, best_text = scored_candidates[0]
+            return best_text, round(best_conf, 2)
 
-        return best_text, best_conf
+        # Fallback if all OCR passes returned empty
+        color_text, color_conf = clean_and_normalize([], img=img)
+        return color_text, color_conf
     except Exception as e:
         import traceback
         traceback.print_exc()

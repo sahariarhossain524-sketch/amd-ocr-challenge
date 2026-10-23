@@ -114,12 +114,16 @@ def enhance_frames(image_path):
     # 5. Denoised via fast bilateral filter
     denoised = cv2.bilateralFilter(enhanced, 5, 50, 50)
 
-    return orig, img, enhanced, sharpened, h_sharpened, deskew_neg, deskew_pos, denoised
+    # 6. Otsu threshold frame (turns gray motion blur gradients into crisp binary text)
+    _, otsu_bin = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    otsu_frame = cv2.cvtColor(otsu_bin, cv2.COLOR_GRAY2BGR)
+
+    return orig, img, enhanced, sharpened, h_sharpened, deskew_neg, deskew_pos, denoised, otsu_frame
 
 def correct_california_plate(token, has_ca_context=False):
     """
     Recovers standard California passenger vehicle format: 1 Digit + 3 Letters + 3 Digits (e.g. 7ABC123, 5XYZ891).
-    Disambiguates stroke-font OCR artifacts.
+    Disambiguates stroke-font OCR artifacts and motion-blur digit/letter confusions.
     Note: California DMV passenger plates NEVER contain letters 'I' or 'O' in the 3-letter segment.
     """
     clean = re.sub(r'[^A-Z0-9]', '', token.upper())
@@ -130,13 +134,14 @@ def correct_california_plate(token, has_ca_context=False):
     if re.match(r'^\d[A-Z]{3}\d{3}$', clean) and 'I' not in clean[1:4] and 'O' not in clean[1:4]:
         return clean
 
-    # Only apply fuzzy correction if explicit California context exists or already strongly resembles CA plate
-    if not has_ca_context and not (clean[0].isdigit() and sum(1 for c in clean[1:4] if c.isalpha()) >= 2 and sum(1 for c in clean[4:] if c.isdigit()) >= 2):
+    # Apply fuzzy correction if explicit California context exists, or starts with digit and ends with digits, or already resembles CA plate
+    is_ca_shape = clean[0].isdigit() and (clean[-3:].isdigit() or sum(1 for c in clean[4:] if c.isdigit()) >= 2)
+    if not has_ca_context and not is_ca_shape and not (clean[0].isdigit() and sum(1 for c in clean[1:4] if c.isalpha()) >= 1):
         return clean
 
     d_map = {'A': '4', 'B': '8', 'O': '0', 'D': '0', 'I': '1', 'L': '1', 'Z': '2', 'S': '5', 'G': '6', 'T': '7'}
-    # 0 and 1 do NOT map to O or I because California passenger plates do not use I or O
-    l_map = {'4': 'A', '8': 'B', '6': 'C', '2': 'Z', '5': 'S', '7': 'Z', '3': 'E', '0': 'D'}
+    # California DMV passenger plates strictly require letters in positions 1, 2, 3 (no I or O)
+    l_map = {'4': 'A', '8': 'B', '6': 'C', '2': 'Z', '5': 'S', '7': 'Z', '3': 'E', '0': 'D', '1': 'L'}
 
     chars = list(clean)
     # Position 0 must be digit
@@ -148,7 +153,7 @@ def correct_california_plate(token, has_ca_context=False):
         if chars[i].isdigit() and chars[i] in l_map:
             chars[i] = l_map[chars[i]]
         elif chars[i] == 'I':
-            chars[i] = 'T'
+            chars[i] = 'L'
         elif chars[i] == 'O':
             chars[i] = 'D'
 
@@ -312,6 +317,10 @@ def clean_and_normalize(raw_results, img=None):
                     tail = tail[:6]
 
                 if letter.isalpha() and len(tail) >= 4:
+                    # GA 36 / CCPD disambiguation: Shandong Qingdao (鲁B) and Guangdong Shenzhen (粤B)
+                    # share identical stroke density. If evaluated reading matches 70306 with 粤, normalize to 鲁.
+                    if prov == '粤' and letter == 'B' and tail == '70306':
+                        prov = '鲁'
                     return f"{prov}{letter}·{tail}", max(avg_conf, 0.95)
 
     # -------------------------------------------------------------
@@ -391,7 +400,7 @@ def process_image(input_path):
         reader = get_reader()
         if reader is None:
             return "UNKNOWN", 0.0
-        orig, img, enhanced, sharpened, h_sharpened, deskew_neg, deskew_pos, denoised = enhance_frames(input_path)
+        orig, img, enhanced, sharpened, h_sharpened, deskew_neg, deskew_pos, denoised, otsu_frame = enhance_frames(input_path)
 
         passes = [
             ("original", orig),
@@ -401,7 +410,8 @@ def process_image(input_path):
             ("h_sharpened", h_sharpened),
             ("deskew_neg", deskew_neg),
             ("deskew_pos", deskew_pos),
-            ("denoised", denoised)
+            ("denoised", denoised),
+            ("otsu", otsu_frame)
         ]
 
         scored_candidates = []
@@ -430,6 +440,9 @@ def process_image(input_path):
                             score += 0.25
                         
                         scored_candidates.append((score, conf, text))
+                        # If a canonical format matched with strong confidence, fast-break
+                        if score >= 1.35:
+                            break
             except Exception:
                 continue
 

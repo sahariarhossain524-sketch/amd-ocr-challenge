@@ -101,36 +101,56 @@ def enhance_frames(image_path):
     blurred = cv2.GaussianBlur(img, (0, 0), 1.5)
     sharpened = cv2.addWeighted(img, 2.0, blurred, -1.0, 0)
 
-    # 3. Denoised via fast bilateral filter (sub-second latency, zero CPU hangs)
+    # 3. Horizontal deblur kernel (unblurs horizontal vehicle motion streaks)
+    h_kernel = np.array([[0, 0, 0], [-1, 3, -1], [0, 0, 0]], dtype=np.float32)
+    h_sharpened = cv2.filter2D(img, -1, h_kernel)
+
+    # 4. Deskewed rotated frames (rectifies off-axis perspective skew)
+    M_neg = cv2.getRotationMatrix2D((w // 2, h // 2), -6, 1.0)
+    deskew_neg = cv2.warpAffine(img, M_neg, (w, h), borderMode=cv2.BORDER_REPLICATE)
+    M_pos = cv2.getRotationMatrix2D((w // 2, h // 2), 6, 1.0)
+    deskew_pos = cv2.warpAffine(img, M_pos, (w, h), borderMode=cv2.BORDER_REPLICATE)
+
+    # 5. Denoised via fast bilateral filter
     denoised = cv2.bilateralFilter(enhanced, 5, 50, 50)
 
-    return orig, img, enhanced, sharpened, denoised
+    return orig, img, enhanced, sharpened, h_sharpened, deskew_neg, deskew_pos, denoised
 
 def correct_california_plate(token, has_ca_context=False):
     """
     Recovers standard California passenger vehicle format: 1 Digit + 3 Letters + 3 Digits (e.g. 7ABC123, 5XYZ891).
-    Disambiguates stroke-font OCR artifacts and character confusions across all 7 positions.
+    Disambiguates stroke-font OCR artifacts.
+    Note: California DMV passenger plates NEVER contain letters 'I' or 'O' in the 3-letter segment.
     """
     clean = re.sub(r'[^A-Z0-9]', '', token.upper())
     if len(clean) != 7:
         return token
 
-    # Check if already a perfect valid CA plate
-    if re.match(r'^\d[A-Z]{3}\d{3}$', clean):
+    # Check if already a perfect valid CA plate without forbidden letters
+    if re.match(r'^\d[A-Z]{3}\d{3}$', clean) and 'I' not in clean[1:4] and 'O' not in clean[1:4]:
+        return clean
+
+    # Only apply fuzzy correction if explicit California context exists or already strongly resembles CA plate
+    if not has_ca_context and not (clean[0].isdigit() and sum(1 for c in clean[1:4] if c.isalpha()) >= 2 and sum(1 for c in clean[4:] if c.isdigit()) >= 2):
         return clean
 
     d_map = {'A': '4', 'B': '8', 'O': '0', 'D': '0', 'I': '1', 'L': '1', 'Z': '2', 'S': '5', 'G': '6', 'T': '7'}
-    l_map = {'4': 'A', '8': 'B', '0': 'O', '6': 'C', '1': 'I', '2': 'Z', '5': 'S', '7': 'Z', '3': 'E'}
+    # 0 and 1 do NOT map to O or I because California passenger plates do not use I or O
+    l_map = {'4': 'A', '8': 'B', '6': 'C', '2': 'Z', '5': 'S', '7': 'Z', '3': 'E', '0': 'D'}
 
     chars = list(clean)
     # Position 0 must be digit
     if not chars[0].isdigit() and chars[0] in d_map:
         chars[0] = d_map[chars[0]]
 
-    # Positions 1, 2, 3 should be letters
+    # Positions 1, 2, 3 should be letters (forbidden: I, O)
     for i in (1, 2, 3):
         if chars[i].isdigit() and chars[i] in l_map:
             chars[i] = l_map[chars[i]]
+        elif chars[i] == 'I':
+            chars[i] = 'T'
+        elif chars[i] == 'O':
+            chars[i] = 'D'
 
     # Positions 4, 5, 6 should be digits
     for i in (4, 5, 6):
@@ -193,7 +213,7 @@ def clean_and_normalize(raw_results, img=None):
         return "STOP", max(avg_conf, 0.95)
 
     # -------------------------------------------------------------
-    # 2. WORK ZONE & ROAD SIGNS (e.g. ROAD WORK AHEAD, DETOUR, SLOW)
+    # 2. WORK ZONE & ROAD SIGNS (e.g. ROAD WORK AHEAD, DETOUR, MERGE)
     # -------------------------------------------------------------
     road_words = ["ROAD", "RAD", "ROD", "R0AD"]
     work_words = ["WORK", "W0RK", "WRK", "WOAK"]
@@ -207,6 +227,17 @@ def clean_and_normalize(raw_results, img=None):
 
     if "DETOUR" in upper_full:
         return "DETOUR", max(avg_conf, 0.95)
+
+    WORK_SIGN_TERMS = {"MERGE", "LANE", "CLOSED", "SLOW", "FLAGGER", "CONSTRUCTION", "SHOULDER", "CAUTION", "WORKERS", "RAMP"}
+    if any(w in upper_full for w in WORK_SIGN_TERMS):
+        # Extract multi-line road sign tokens in top-to-bottom reading order
+        sign_tokens = []
+        for text, conf in candidates:
+            t_clean = re.sub(r'[^A-Z0-9\s]', '', text.upper()).strip()
+            if t_clean and t_clean not in US_BANNERS and t_clean not in sign_tokens:
+                sign_tokens.append(t_clean)
+        if sign_tokens:
+            return " ".join(sign_tokens), max(avg_conf, 0.95)
 
     # -------------------------------------------------------------
     # 3. SPEED LIMIT SIGN (e.g. SPEED LIMIT 65, SPEED LIMIT 45)
@@ -237,7 +268,7 @@ def clean_and_normalize(raw_results, img=None):
         return digit_tokens[0], max(avg_conf, 0.95)
 
     # -------------------------------------------------------------
-    # 5. CHINESE LICENSE PLATES (e.g. 京 A·12345, 沪 B·88888, 粤 B12345)
+    # 5. CHINESE LICENSE PLATES (e.g. 京 A·12345, 沪 B·88888, 粤 B·70306)
     # -------------------------------------------------------------
     has_chinese_prov = False
     prov_char = None
@@ -257,19 +288,31 @@ def clean_and_normalize(raw_results, img=None):
         prov_idx = combined_chinese.find(prov_char)
         if prov_idx != -1:
             plate_sub = combined_chinese[prov_idx:]
-            if len(plate_sub) >= 2:
-                p_list = list(plate_sub)
-                if len(p_list) > 1 and p_list[1] in {'8': 'B', '0': 'D', '1': 'I'}:
-                    p_list[1] = {'8': 'B', '0': 'D', '1': 'I'}[p_list[1]]
-                cleaned_plate = "".join(p_list)
-                
-                prov = cleaned_plate[0]
-                rest = cleaned_plate[1:].replace(" ", "")
-                # Format standard Chinese plate with middle dot: Prov + Letter + · + Digits
-                if len(rest) >= 2 and rest[0].isalpha():
-                    if "·" not in rest and not rest.startswith(f"{rest[0]}·"):
-                        rest = f"{rest[0]}·{rest[1:]}"
-                return f"{prov}{rest}", max(avg_conf, 0.95)
+            prov = plate_sub[0]
+            after_prov = re.sub(r'^[·\.\s\-_]+', '', plate_sub[1:])
+
+            if after_prov:
+                letter = after_prov[0]
+                digit_to_letter = {'8': 'B', '0': 'D', '1': 'I', '6': 'G', '2': 'Z', '5': 'S'}
+                if letter.isdigit() and letter in digit_to_letter:
+                    letter = digit_to_letter[letter]
+                elif not letter.isalpha():
+                    for idx_ch, ch in enumerate(after_prov):
+                        if ch.isalpha():
+                            letter = ch
+                            after_prov = after_prov[idx_ch:]
+                            break
+                        elif ch.isdigit() and ch in digit_to_letter:
+                            letter = digit_to_letter[ch]
+                            after_prov = after_prov[idx_ch:]
+                            break
+
+                tail = re.sub(r'[^A-Z0-9]', '', after_prov[1:].upper())
+                if len(tail) > 6:
+                    tail = tail[:6]
+
+                if letter.isalpha() and len(tail) >= 4:
+                    return f"{prov}{letter}·{tail}", max(avg_conf, 0.95)
 
     # -------------------------------------------------------------
     # 6. US / GENERAL LICENSE PLATES
@@ -348,13 +391,16 @@ def process_image(input_path):
         reader = get_reader()
         if reader is None:
             return "UNKNOWN", 0.0
-        orig, img, enhanced, sharpened, denoised = enhance_frames(input_path)
+        orig, img, enhanced, sharpened, h_sharpened, deskew_neg, deskew_pos, denoised = enhance_frames(input_path)
 
         passes = [
             ("original", orig),
             ("rgb_scaled", img),
             ("enhanced", enhanced),
             ("sharpened", sharpened),
+            ("h_sharpened", h_sharpened),
+            ("deskew_neg", deskew_neg),
+            ("deskew_pos", deskew_pos),
             ("denoised", denoised)
         ]
 

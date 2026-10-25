@@ -284,8 +284,6 @@ def clean_and_normalize(raw_results, img=None):
     has_chinese_prov = False
     prov_char = None
     for c in candidates:
-        if '70306' in c[0]:
-            return "京A·70306", max(avg_conf, 0.98)
         for prov in CHINESE_PROVINCES:
             if prov in c[0]:
                 has_chinese_prov = True
@@ -325,11 +323,6 @@ def clean_and_normalize(raw_results, img=None):
                     tail = tail[:6]
 
                 if letter.isalpha() and len(tail) >= 4:
-                    # AMD Challenge Category 2: Chinese plate (Beijing), clean (Page 10 convention: 京A·...)
-                    # Beijing vehicle registrations strictly designate 京A. EasyOCR confuses 京 with 粤/鲁 and A with B/8.
-                    if tail == '70306':
-                        prov = '京'
-                        letter = 'A'
                     return f"{prov}{letter}·{tail}", max(avg_conf, 0.95)
 
     # -------------------------------------------------------------
